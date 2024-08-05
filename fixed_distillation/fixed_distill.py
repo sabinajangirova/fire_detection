@@ -16,7 +16,7 @@ import timm
 from transformers import ViTFeatureExtractor
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+torch.cuda.empty_cache()
 class Distiller(nn.Module):
     def __init__(self, student, teacher):
         super(Distiller, self).__init__()
@@ -93,7 +93,7 @@ class Distiller(nn.Module):
         }
 
 # Setup logging
-log_file = 'distill_vit16_fixed_1.log'
+log_file = 'distill_vit16_fixed_17.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, 
                     format='%(asctime)s %(message)s')
 
@@ -129,15 +129,15 @@ data_transforms = {
 }
 
 # Load the datasets with ImageFolder
-data_dir = '/home/sabina.jangirova/Documents/thesis_sagin/fire_detection/dataset'
+data_dir = '~/fire_detection/fire_detection/dataset'
 image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms[x]) for x in ['train', 'val']}
-dataloaders = {x: DataLoader(image_datasets[x], batch_size=32, shuffle=True, num_workers=4) for x in ['train', 'val']}
+dataloaders = {x: DataLoader(image_datasets[x], batch_size=16, shuffle=True, num_workers=4) for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
 num_classes = len(class_names)
 
 # Move the model to GPU if available
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Calculate class weights
 class_weights = compute_class_weight('balanced', classes=np.unique(image_datasets['train'].targets), y=image_datasets['train'].targets)
@@ -145,7 +145,7 @@ class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
 
 # Load the pre-trained ViT model
 model = timm.create_model('vit_base_patch16_224', pretrained=False, num_classes=num_classes)
-checkpoint_path = '/home/sabina.jangirova/Documents/thesis_sagin/fire_detection/best_vit_model_weights_vit16_50_epochs.pth'
+checkpoint_path = '/fsx/homes/Sabina.Jangirova@mbzuai.ac.ae/fire_detection/fire_detection/best_vit_model_weights_vit16_50_epochs.pth'
 state_dict = torch.load(checkpoint_path, map_location='cpu')
 model.load_state_dict(state_dict)
 model = model.to(device)
@@ -169,32 +169,132 @@ student_model_config = {
     'patch_size': 16,
     'depth': 6,        # Fewer transformer layers
     'num_heads': 6,    # Fewer attention heads
-    'mlp_ratio': 2.0,
+    'mlp_ratio': 6.0,
     'qkv_bias': True,
     'norm_layer': torch.nn.LayerNorm,
 }
 
-# Function to create a student model based on the modified configuration
-def create_student_vit(config, num_classes):
-    model = timm.models.vision_transformer.VisionTransformer(
-        img_size=224,
-        patch_size=config['patch_size'],
-        depth=config['depth'],
-        num_heads=config['num_heads'],
-        mlp_ratio=config['mlp_ratio'],
-        qkv_bias=config['qkv_bias'],
-        norm_layer=config['norm_layer'],
-        num_classes=num_classes
-    )
-    
-    return model
-    
-student_model = create_student_vit(student_model_config, num_classes)
+class ShiftedPatchTokenization(nn.Module):
+    def __init__(self, patch_size, embed_dim, num_shifts=4):
+        super(ShiftedPatchTokenization, self).__init__()
+        self.patch_size = patch_size
+        self.num_shifts = num_shifts
+        self.patch_embed = nn.Linear(patch_size * patch_size * 3 * (num_shifts + 1), embed_dim)
+        self.norm = nn.LayerNorm(embed_dim)
 
+    def forward(self, x):
+        B, C, H, W = x.size()
+        shifts = [
+            (0, 0),  # original
+            (-self.patch_size // 2, -self.patch_size // 2),  # top-left
+            (-self.patch_size // 2, self.patch_size // 2),   # top-right
+            (self.patch_size // 2, -self.patch_size // 2),   # bottom-left
+            (self.patch_size // 2, self.patch_size // 2)     # bottom-right
+        ]
+        patches = []
+        for dx, dy in shifts:
+            shifted_x = torch.roll(x, shifts=(dx, dy), dims=(2, 3))
+            patch = shifted_x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+            patch = patch.contiguous().view(B, C, -1, self.patch_size * self.patch_size).permute(0, 2, 3, 1)
+            patch = patch.contiguous().view(B, -1, self.patch_size * self.patch_size * C)
+            patches.append(patch)
+        tokens = torch.cat(patches, dim=-1)
+        tokens = self.patch_embed(tokens)
+        tokens = self.norm(tokens)
+        return tokens
+
+class LocalitySelfAttention(nn.Module):
+    def __init__(self, dim, num_heads=6, qkv_bias=False, attn_drop=0., proj_drop=0., temperature=1.0):
+        super(LocalitySelfAttention, self).__init__()
+        self.num_heads = num_heads
+        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1) * temperature)
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2] 
+
+        attn = (q @ k.transpose(-2, -1)) / (C ** 0.5)
+        attn = attn / self.temperature
+        attn = attn.masked_fill(torch.eye(N, device=attn.device).bool(), float('-inf'))
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+class ImprovedViT(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=12, embed_dim=768, depth=6, num_heads=6, mlp_ratio=6., qkv_bias=False, drop_rate=0., attn_drop_rate=0., norm_layer=nn.LayerNorm):
+        super(ImprovedViT, self).__init__()
+        self.num_classes = num_classes
+        self.patch_embed = ShiftedPatchTokenization(patch_size, embed_dim)
+        self.pos_embed = nn.Parameter(torch.zeros(1, (img_size // patch_size) ** 2 + 1, embed_dim))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_drop = nn.Dropout(p=drop_rate)
+        self.blocks = nn.ModuleList([
+            nn.Sequential(
+                norm_layer(embed_dim),
+                LocalitySelfAttention(embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop_rate, proj_drop=drop_rate),
+                nn.Dropout(drop_rate),
+                norm_layer(embed_dim),
+                nn.Sequential(
+                    nn.Linear(embed_dim, int(embed_dim * mlp_ratio)),
+                    nn.GELU(),
+                    nn.Dropout(drop_rate),
+                    nn.Linear(int(embed_dim * mlp_ratio), embed_dim),
+                    nn.Dropout(drop_rate)
+                )
+            )
+            for _ in range(depth)
+        ])
+        self.norm = norm_layer(embed_dim)
+        self.head = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, x):
+        B = x.shape[0]
+        x = self.patch_embed(x)
+        cls_tokens = self.cls_token.expand(B, -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x = x + self.pos_embed
+        x = self.pos_drop(x)
+
+        for blk in self.blocks:
+            x = blk(x)
+
+        x = self.norm(x)
+        cls_token_final = x[:, 0]
+        x = self.head(cls_token_final)
+        return x
+
+student_model = ImprovedViT()
+
+# Function to create a student model based on the modified configuration
+#def create_student_vit(config, num_classes):
+#    model = timm.models.vision_transformer.VisionTransformer(
+#        img_size=224,
+#        patch_size=config['patch_size'],
+#        depth=config['depth'],
+#        num_heads=config['num_heads'],
+#        mlp_ratio=config['mlp_ratio'],
+#        qkv_bias=config['qkv_bias'],
+#        norm_layer=config['norm_layer'],
+#        num_classes=num_classes
+#    )
+#    
+#    return model
+    
+#student_model = create_student_vit(student_model_config, num_classes)
+#student_model = timm.create_model('mobilenetv3_large_100', pretrained=False, num_classes=num_classes)
 # Verify the model
 logging.info(student_model)
 
-student_model_scratch = create_student_vit(student_model_config, num_classes)
+#student_model_scratch = create_student_vit(student_model_config, num_classes)
 
 from torchsummary import summary
 
@@ -246,7 +346,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), 'best_student_vit16_model_fixed_1.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_17.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -264,11 +364,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_1.png')
+plt.savefig('losses_plot_distilled_fixed_17.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('best_student_vit16_model_fixed_1.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_17.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -291,9 +391,8 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_1.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_17.png')
 plt.close()
 
 # Save the trained student model
-torch.save(student_model.state_dict(), 'distilled_student_vit16_model_fixed_1.pth')
 logging.info("Model saved successfully.")
