@@ -20,6 +20,81 @@ from scipy.optimize import differential_evolution
 
 torch.cuda.empty_cache()
 
+class ChannelAttention(nn.Module):
+    def __init__(self, in_channels):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc1 = nn.Conv2d(in_channels, in_channels // 16, kernel_size=1, padding=0)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Conv2d(in_channels // 16, in_channels, kernel_size=1, padding=0)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc2(self.relu(self.fc1(self.avg_pool(x))))
+        max_out = self.fc2(self.relu(self.fc1(self.max_pool(x))))
+        out = avg_out + max_out
+        return self.sigmoid(out) * x
+
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x) * x
+
+class DualFireAttention(nn.Module):
+    def __init__(self, in_channels):
+        super(DualFireAttention, self).__init__()
+        self.ca = ChannelAttention(in_channels)
+        self.sa = SpatialAttention()
+
+    def forward(self, x):
+        x = self.ca(x)
+        x = self.sa(x)
+        return x
+    
+class ViTWithDFA(nn.Module):
+    def __init__(self, config=None, num_classes=1000):
+        super(ViTWithDFA, self).__init__()
+        self.vit = timm.models.vision_transformer.VisionTransformer(
+            img_size=224,
+            patch_size=config['patch_size'],
+            depth=config['depth'],
+            num_heads=config['num_heads'],
+            mlp_ratio=config['mlp_ratio'],
+            qkv_bias=config['qkv_bias'],
+            norm_layer=config['norm_layer'],
+            num_classes=num_classes
+        )
+        self.dfa = DualFireAttention(self.vit.embed_dim)
+
+    def forward(self, x):
+        x = self.vit.patch_embed(x)
+        cls_token = self.vit.cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_token, x), dim=1)
+        x = x + self.vit.pos_embed
+        x = self.vit.pos_drop(x)
+
+        for block in self.vit.blocks:
+            x = block(x)
+
+        x = self.vit.norm(x)
+        cls_token_final = x[:, 0]
+        features = cls_token_final.unsqueeze(-1).unsqueeze(-1)
+        features = self.dfa(features)
+        features = features.squeeze(-1).squeeze(-1)
+        x = self.vit.head(features)
+        return x
+
+
 # Define the Distiller class
 class Distiller(nn.Module):
     def __init__(self, student, teacher):
@@ -131,21 +206,7 @@ student_model_config = {
     'norm_layer': torch.nn.LayerNorm,
 }
 
-# Function to create a student model based on the modified configuration
-def create_student_vit(config, num_classes):
-    model = timm.models.vision_transformer.VisionTransformer(
-        img_size=224,
-        patch_size=config['patch_size'],
-        depth=config['depth'],
-        num_heads=config['num_heads'],
-        mlp_ratio=config['mlp_ratio'],
-        qkv_bias=config['qkv_bias'],
-        norm_layer=config['norm_layer'],
-        num_classes=num_classes
-    )
-    return model
-
-student_model = create_student_vit(student_model_config, num_classes)
+student_model = ViTWithDFA(config=student_model_config, num_classes=num_classes)
 student_model = student_model.to(device)
 
 optimizer = optim.Adam(student_model.parameters(), lr=0.00001)
@@ -153,56 +214,6 @@ distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
 distiller = Distiller(student=student_model, teacher=model)
 distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
-
-def prune_model(model, neuron_mask):
-    for i, mask in enumerate(neuron_mask):
-        layer = model.blocks[i]
-        if hasattr(layer, 'mlp'):
-            pruned_out_features = int(sum(mask))
-            in_features = layer.mlp.fc1.weight.shape[1]
-            fc1 = nn.Linear(in_features, pruned_out_features, bias=layer.mlp.fc1.bias is not None).to(device)
-            fc2 = nn.Linear(pruned_out_features, layer.mlp.fc2.weight.shape[0], bias=layer.mlp.fc2.bias is not None).to(device)
-            with torch.no_grad():
-                fc1.weight.copy_(layer.mlp.fc1.weight[:, mask])
-                fc1.bias.copy_(layer.mlp.fc1.bias[mask] if layer.mlp.fc1.bias is not None else None)
-                fc2.weight.copy_(layer.mlp.fc2.weight[mask, :])
-                fc2.bias.copy_(layer.mlp.fc2.bias if layer.mlp.fc2.bias is not None else None)
-            layer.mlp.fc1 = fc1
-            layer.mlp.fc2 = fc2
-            layer.mlp.fc1.out_features = pruned_out_features
-
-def evaluate_student(neuron_mask, model, X_train, y_train):
-    prune_model(model, neuron_mask)
-    model.eval()
-    with torch.no_grad():
-        outputs = model(X_train)
-        loss = criterion(outputs, y_train)
-        accuracy = (outputs.argmax(dim=1) == y_train).float().mean().item()
-    return -accuracy  # We minimize the negative accuracy
-
-def meta_heuristic_pruning(model, X_train, y_train):
-    num_neurons = [layer.mlp.fc1.out_features for layer in model.blocks if hasattr(layer, 'mlp')]
-    bounds = [(0, 1)] * sum(num_neurons)
-
-    def prune_model(weights):
-        mask = np.split(weights > 0.5, np.cumsum(num_neurons[:-1]))
-        return mask
-
-    result = differential_evolution(
-        lambda w: evaluate_student(prune_model(w), model, X_train, y_train),
-        bounds, strategy='best1bin', maxiter=100, popsize=15
-    )
-
-    best_mask = prune_model(result.x)
-    return best_mask
-
-# Prune the student model
-logging.info("Pruning the student model...")
-X_train, y_train = next(iter(dataloaders['train']))
-X_train, y_train = X_train.to(device), y_train.to(device)
-best_mask = meta_heuristic_pruning(student_model, X_train, y_train)
-logging.info(f"Best mask for neurons: {best_mask}")
-prune_model(student_model, best_mask)
 
 num_epochs = 500
 train_losses = []
