@@ -16,7 +16,11 @@ import timm
 from transformers import ViTFeatureExtractor
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.optimize import differential_evolution
+
 torch.cuda.empty_cache()
+
+# Define the Distiller class
 class Distiller(nn.Module):
     def __init__(self, student, teacher):
         super(Distiller, self).__init__()
@@ -24,16 +28,6 @@ class Distiller(nn.Module):
         self.student = student
 
     def compile(self, optimizer, student_loss_fn, distillation_loss_fn, alpha=0.1, temperature=3):
-        """
-        Configure the distiller.
-
-        Args:
-            optimizer: PyTorch optimizer for the student weights
-            student_loss_fn: Loss function of difference between student predictions and ground-truth
-            distillation_loss_fn: Loss function of difference between soft student predictions and soft teacher predictions
-            alpha: weight to student_loss_fn and 1-alpha to distillation_loss_fn
-            temperature: Temperature for softening probability distributions. Larger temperature gives softer distributions.
-        """
         self.optimizer = optimizer
         self.student_loss_fn = student_loss_fn
         self.distillation_loss_fn = distillation_loss_fn
@@ -41,61 +35,34 @@ class Distiller(nn.Module):
         self.temperature = temperature
 
     def train_step(self, data):
-        # Unpack data
         x, y = data
-
-        # Forward pass of teacher
         with torch.no_grad():
             teacher_predictions = self.teacher(x)
-
-        # Forward pass of student
         student_predictions = self.student(x)
-
-        # Compute losses
         student_loss = self.student_loss_fn(student_predictions, y)
         distillation_loss = self.distillation_loss_fn(
             torch.log_softmax(student_predictions / self.temperature, dim=1),
             torch.softmax(teacher_predictions / self.temperature, dim=1)
         ) * (self.temperature ** 2)
         loss = self.alpha * student_loss + (1 - self.alpha) * distillation_loss
-
-        # Compute gradients
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
-        # Log system usage
         log_system_usage()
-
         logging.info(f"Train - Loss: {loss.item()}, Student Loss: {student_loss.item()}, Distillation Loss: {distillation_loss.item()}")
-
-        return {
-            "loss": loss.item(),
-            "student_loss": student_loss.item(),
-            "distillation_loss": distillation_loss.item()
-        }
+        return {"loss": loss.item(), "student_loss": student_loss.item(), "distillation_loss": distillation_loss.item()}
 
     def test_step(self, data):
-        # Unpack the data
         x, y = data
-
-        # Compute predictions
         with torch.no_grad():
             y_pred = self.student(x)
-
-        # Calculate the loss
         student_loss = self.student_loss_fn(y_pred, y)
-
         logging.info(f"Test - Student Loss: {student_loss.item()}")
-
-        return {
-            "student_loss": student_loss.item()
-        }
+        return {"student_loss": student_loss.item()}
 
 # Setup logging
 log_file = 'distill_vit16_fixed_17.log'
-logging.basicConfig(filename=log_file, level=logging.INFO, 
-                    format='%(asctime)s %(message)s')
+logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
     process = psutil.Process(os.getpid())
@@ -108,6 +75,7 @@ def log_system_usage():
 
 logging.info("Starting distillation...")
 
+# Load the pre-trained ViT feature extractor
 feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
 
 data_transforms = {
@@ -153,18 +121,7 @@ model = model.to(device)
 # Define loss function and optimizer
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 
-# model.head = nn.Identity()
-
-# student_model_config = {
-#     'patch_size': 16,
-#     'embed_dim': 192,  # Smaller embedding dimension
-#     'depth': 8,        # Fewer transformer layers
-#     'num_heads': 6,    # Fewer attention heads
-#     'mlp_ratio': 4.0,
-#     'qkv_bias': True,
-#     'norm_layer': torch.nn.LayerNorm,
-# }
-
+# Define student model
 student_model_config = {
     'patch_size': 16,
     'depth': 6,        # Fewer transformer layers
@@ -174,132 +131,22 @@ student_model_config = {
     'norm_layer': torch.nn.LayerNorm,
 }
 
-class ShiftedPatchTokenization(nn.Module):
-    def __init__(self, patch_size, embed_dim, num_shifts=4):
-        super(ShiftedPatchTokenization, self).__init__()
-        self.patch_size = patch_size
-        self.num_shifts = num_shifts
-        self.patch_embed = nn.Linear(patch_size * patch_size * 3 * (num_shifts + 1), embed_dim)
-        self.norm = nn.LayerNorm(embed_dim)
-
-    def forward(self, x):
-        B, C, H, W = x.size()
-        shifts = [
-            (0, 0),  # original
-            (-self.patch_size // 2, -self.patch_size // 2),  # top-left
-            (-self.patch_size // 2, self.patch_size // 2),   # top-right
-            (self.patch_size // 2, -self.patch_size // 2),   # bottom-left
-            (self.patch_size // 2, self.patch_size // 2)     # bottom-right
-        ]
-        patches = []
-        for dx, dy in shifts:
-            shifted_x = torch.roll(x, shifts=(dx, dy), dims=(2, 3))
-            patch = shifted_x.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
-            patch = patch.contiguous().view(B, C, -1, self.patch_size * self.patch_size).permute(0, 2, 3, 1)
-            patch = patch.contiguous().view(B, -1, self.patch_size * self.patch_size * C)
-            patches.append(patch)
-        tokens = torch.cat(patches, dim=-1)
-        tokens = self.patch_embed(tokens)
-        tokens = self.norm(tokens)
-        return tokens
-
-class LocalitySelfAttention(nn.Module):
-    def __init__(self, dim, num_heads=6, qkv_bias=False, attn_drop=0., proj_drop=0., temperature=1.0):
-        super(LocalitySelfAttention, self).__init__()
-        self.num_heads = num_heads
-        self.temperature = nn.Parameter(torch.ones(num_heads, 1, 1) * temperature)
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2] 
-
-        attn = (q @ k.transpose(-2, -1)) / (C ** 0.5)
-        attn = attn / self.temperature
-        attn = attn.masked_fill(torch.eye(N, device=attn.device).bool(), float('-inf'))
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-class ImprovedViT(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=12, embed_dim=768, depth=6, num_heads=6, mlp_ratio=6., qkv_bias=False, drop_rate=0., attn_drop_rate=0., norm_layer=nn.LayerNorm):
-        super(ImprovedViT, self).__init__()
-        self.num_classes = num_classes
-        self.patch_embed = ShiftedPatchTokenization(patch_size, embed_dim)
-        self.pos_embed = nn.Parameter(torch.zeros(1, (img_size // patch_size) ** 2 + 1, embed_dim))
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_drop = nn.Dropout(p=drop_rate)
-        self.blocks = nn.ModuleList([
-            nn.Sequential(
-                norm_layer(embed_dim),
-                LocalitySelfAttention(embed_dim, num_heads=num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop_rate, proj_drop=drop_rate),
-                nn.Dropout(drop_rate),
-                norm_layer(embed_dim),
-                nn.Sequential(
-                    nn.Linear(embed_dim, int(embed_dim * mlp_ratio)),
-                    nn.GELU(),
-                    nn.Dropout(drop_rate),
-                    nn.Linear(int(embed_dim * mlp_ratio), embed_dim),
-                    nn.Dropout(drop_rate)
-                )
-            )
-            for _ in range(depth)
-        ])
-        self.norm = norm_layer(embed_dim)
-        self.head = nn.Linear(embed_dim, num_classes)
-
-    def forward(self, x):
-        B = x.shape[0]
-        x = self.patch_embed(x)
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
-        x = x + self.pos_embed
-        x = self.pos_drop(x)
-
-        for blk in self.blocks:
-            x = blk(x)
-
-        x = self.norm(x)
-        cls_token_final = x[:, 0]
-        x = self.head(cls_token_final)
-        return x
-
-student_model = ImprovedViT()
-
 # Function to create a student model based on the modified configuration
-#def create_student_vit(config, num_classes):
-#    model = timm.models.vision_transformer.VisionTransformer(
-#        img_size=224,
-#        patch_size=config['patch_size'],
-#        depth=config['depth'],
-#        num_heads=config['num_heads'],
-#        mlp_ratio=config['mlp_ratio'],
-#        qkv_bias=config['qkv_bias'],
-#        norm_layer=config['norm_layer'],
-#        num_classes=num_classes
-#    )
-#    
-#    return model
-    
-#student_model = create_student_vit(student_model_config, num_classes)
-#student_model = timm.create_model('mobilenetv3_large_100', pretrained=False, num_classes=num_classes)
-# Verify the model
-logging.info(student_model)
+def create_student_vit(config, num_classes):
+    model = timm.models.vision_transformer.VisionTransformer(
+        img_size=224,
+        patch_size=config['patch_size'],
+        depth=config['depth'],
+        num_heads=config['num_heads'],
+        mlp_ratio=config['mlp_ratio'],
+        qkv_bias=config['qkv_bias'],
+        norm_layer=config['norm_layer'],
+        num_classes=num_classes
+    )
+    return model
 
-#student_model_scratch = create_student_vit(student_model_config, num_classes)
-
-from torchsummary import summary
-
-logging.info(summary(model))
-logging.info(summary(student_model))
+student_model = create_student_vit(student_model_config, num_classes)
+student_model = student_model.to(device)
 
 optimizer = optim.Adam(student_model.parameters(), lr=0.00001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
@@ -307,7 +154,43 @@ distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 distiller = Distiller(student=student_model, teacher=model)
 distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
 
-student_model.to(device)
+def evaluate_student(neuron_mask, model, X_train, y_train):
+    for layer, mask in zip(model.blocks, neuron_mask):
+        if hasattr(layer, 'mlp'):
+            layer.mlp.fc1.weight.data = layer.mlp.fc1.weight.data[:, mask]
+            layer.mlp.fc1.bias.data = layer.mlp.fc1.bias.data[mask]
+            layer.mlp.fc2.weight.data = layer.mlp.fc2.weight.data[mask, :]
+            layer.mlp.fc2.bias.data = layer.mlp.fc2.bias.data[mask]
+
+    model.eval()
+    with torch.no_grad():
+        outputs = model(X_train)
+        loss = criterion(outputs, y_train)
+        accuracy = (outputs.argmax(dim=1) == y_train).float().mean().item()
+    return -accuracy  # We minimize the negative accuracy
+
+def meta_heuristic_pruning(model, X_train, y_train):
+    num_neurons = [layer.mlp.fc1.out_features for layer in model.blocks if hasattr(layer, 'mlp')]
+    bounds = [(0, 1)] * sum(num_neurons)
+
+    def prune_model(weights):
+        mask = [weights[i:j] for i, j in zip([0] + num_neurons[:-1], num_neurons)]
+        return mask
+
+    result = differential_evolution(
+        lambda w: evaluate_student(prune_model(w), model, X_train, y_train),
+        bounds, strategy='best1bin', maxiter=100, popsize=15
+    )
+
+    best_mask = prune_model(result.x > 0.5)
+    return best_mask
+
+# Prune the student model
+logging.info("Pruning the student model...")
+X_train, y_train = next(iter(dataloaders['train']))
+X_train, y_train = X_train.to(device), y_train.to(device)
+best_mask = meta_heuristic_pruning(student_model, X_train, y_train)
+logging.info(f"Best mask for neurons: {best_mask}")
 
 num_epochs = 500
 train_losses = []
