@@ -154,14 +154,25 @@ distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 distiller = Distiller(student=student_model, teacher=model)
 distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
 
-def evaluate_student(neuron_mask, model, X_train, y_train):
-    for layer, mask in zip(model.blocks, neuron_mask):
+def prune_model(model, neuron_mask):
+    for i, mask in enumerate(neuron_mask):
+        layer = model.blocks[i]
         if hasattr(layer, 'mlp'):
-            layer.mlp.fc1.weight.data = layer.mlp.fc1.weight.data[:, mask]
-            layer.mlp.fc1.bias.data = layer.mlp.fc1.bias.data[mask]
-            layer.mlp.fc2.weight.data = layer.mlp.fc2.weight.data[mask, :]
-            layer.mlp.fc2.bias.data = layer.mlp.fc2.bias.data[mask]
+            pruned_out_features = int(sum(mask))
+            in_features = layer.mlp.fc1.weight.shape[1]
+            fc1 = nn.Linear(in_features, pruned_out_features, bias=layer.mlp.fc1.bias is not None).to(device)
+            fc2 = nn.Linear(pruned_out_features, layer.mlp.fc2.weight.shape[0], bias=layer.mlp.fc2.bias is not None).to(device)
+            with torch.no_grad():
+                fc1.weight.copy_(layer.mlp.fc1.weight[:, mask])
+                fc1.bias.copy_(layer.mlp.fc1.bias[mask] if layer.mlp.fc1.bias is not None else None)
+                fc2.weight.copy_(layer.mlp.fc2.weight[mask, :])
+                fc2.bias.copy_(layer.mlp.fc2.bias if layer.mlp.fc2.bias is not None else None)
+            layer.mlp.fc1 = fc1
+            layer.mlp.fc2 = fc2
+            layer.mlp.fc1.out_features = pruned_out_features
 
+def evaluate_student(neuron_mask, model, X_train, y_train):
+    prune_model(model, neuron_mask)
     model.eval()
     with torch.no_grad():
         outputs = model(X_train)
@@ -174,7 +185,7 @@ def meta_heuristic_pruning(model, X_train, y_train):
     bounds = [(0, 1)] * sum(num_neurons)
 
     def prune_model(weights):
-        mask = [weights[i:j] for i, j in zip([0] + num_neurons[:-1], num_neurons)]
+        mask = np.split(weights > 0.5, np.cumsum(num_neurons[:-1]))
         return mask
 
     result = differential_evolution(
@@ -182,7 +193,7 @@ def meta_heuristic_pruning(model, X_train, y_train):
         bounds, strategy='best1bin', maxiter=100, popsize=15
     )
 
-    best_mask = prune_model(result.x > 0.5)
+    best_mask = prune_model(result.x)
     return best_mask
 
 # Prune the student model
@@ -191,6 +202,7 @@ X_train, y_train = next(iter(dataloaders['train']))
 X_train, y_train = X_train.to(device), y_train.to(device)
 best_mask = meta_heuristic_pruning(student_model, X_train, y_train)
 logging.info(f"Best mask for neurons: {best_mask}")
+prune_model(student_model, best_mask)
 
 num_epochs = 500
 train_losses = []
