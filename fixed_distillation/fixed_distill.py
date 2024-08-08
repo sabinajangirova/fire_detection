@@ -20,61 +20,48 @@ from scipy.optimize import differential_evolution
 
 torch.cuda.empty_cache()
 
-class ChannelAttention(nn.Module):
-    def __init__(self, in_channels):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        self.fc1 = nn.Conv2d(in_channels, in_channels // 16, kernel_size=1, padding=0)
-        self.relu = nn.ReLU()
-        self.fc2 = nn.Conv2d(in_channels // 16, in_channels, kernel_size=1, padding=0)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = self.fc2(self.relu(self.fc1(self.avg_pool(x))))
-        max_out = self.fc2(self.relu(self.fc1(self.max_pool(x))))
-        out = avg_out + max_out
-        return self.sigmoid(out) * x
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return self.sigmoid(x) * x
-
-class DualFireAttention(nn.Module):
-    def __init__(self, in_channels):
-        super(DualFireAttention, self).__init__()
-        self.ca = ChannelAttention(in_channels)
-        self.sa = SpatialAttention()
-
-    def forward(self, x):
-        x = self.ca(x)
-        x = self.sa(x)
-        return x
-    
+# Define the modified ViT model with dual fire attention
 class ViTWithDFA(nn.Module):
-    def __init__(self, config=None, num_classes=1000):
+    def __init__(self, model_name='vit_base_patch16_224', config=None, num_classes=12):
         super(ViTWithDFA, self).__init__()
         self.vit = timm.models.vision_transformer.VisionTransformer(
             img_size=224,
-            patch_size=config['patch_size'],
+            patch_size=16,
+            embed_dim=config['embed_dim'],
             depth=config['depth'],
             num_heads=config['num_heads'],
             mlp_ratio=config['mlp_ratio'],
-            qkv_bias=config['qkv_bias'],
-            norm_layer=config['norm_layer'],
-            num_classes=num_classes
+            qkv_bias=True,
+            norm_layer=nn.LayerNorm,
+            num_classes=0
         )
-        self.dfa = DualFireAttention(self.vit.embed_dim)
+
+        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.dense1 = nn.Sequential(
+            nn.Linear(self.embed_dim, 100),
+            nn.ReLU(),
+            nn.Linear(100, 50),
+            nn.ReLU(),
+            nn.BatchNorm1d(50)
+        )
+
+        self.conv_branch = nn.Sequential(
+            nn.Conv2d(self.embed_dim, 64, kernel_size=1, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=1, padding='same'),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.BatchNorm2d(64)
+        )
+
+        self.final_dense = nn.Sequential(
+            nn.Linear(self.embed_dim + 64 + self.embed_dim, 150),
+            nn.ReLU(),
+            nn.BatchNorm1d(150),
+            nn.Linear(150, num_classes)
+        )
 
     def forward(self, x):
         x = self.vit.patch_embed(x)
@@ -88,12 +75,25 @@ class ViTWithDFA(nn.Module):
 
         x = self.vit.norm(x)
         cls_token_final = x[:, 0]
-        features = cls_token_final.unsqueeze(-1).unsqueeze(-1)
-        features = self.dfa(features)
-        features = features.squeeze(-1).squeeze(-1)
-        x = self.vit.head(features)
-        return x
+        cls_token_final_reshaped = cls_token_final.unsqueeze(-1).unsqueeze(-1)
 
+        # Branch 1
+        flat1 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
+        x1 = self.dense1(flat1)
+
+        # Branch 2
+        x2 = self.conv_branch(cls_token_final_reshaped).flatten(1)
+
+        # Branch 3
+        x3 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
+
+        # Concatenate branches
+        concat = torch.cat([x1, x2], dim=1)
+        concat = torch.cat([x3, concat], dim=1)
+
+        # Final dense layers
+        output = self.final_dense(concat)
+        return output
 
 # Define the Distiller class
 class Distiller(nn.Module):
