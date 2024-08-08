@@ -27,7 +27,6 @@ class ViTWithDFA(nn.Module):
         self.vit = timm.models.vision_transformer.VisionTransformer(
             img_size=224,
             patch_size=16,
-            embed_dim=config['embed_dim'],
             depth=config['depth'],
             num_heads=config['num_heads'],
             mlp_ratio=config['mlp_ratio'],
