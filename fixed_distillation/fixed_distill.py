@@ -56,7 +56,7 @@ class ViTWithDFA(nn.Module):
         )
 
         self.final_dense = nn.Sequential(
-            nn.Linear(self.embed_dim + 64 + self.embed_dim, 150),
+            nn.Linear(self.embed_dim + 64 + 50, 150),  # Ensure the correct input size after concatenation
             nn.ReLU(),
             nn.BatchNorm1d(150),
             nn.Linear(150, num_classes)
@@ -76,19 +76,18 @@ class ViTWithDFA(nn.Module):
         cls_token_final = x[:, 0]
         cls_token_final_reshaped = cls_token_final.unsqueeze(-1).unsqueeze(-1)
 
-        # Branch 1
+        # Branch 1: Global Average Pooling + Dense Layers
         flat1 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
         x1 = self.dense1(flat1)
 
-        # Branch 2
+        # Branch 2: Convolutional Layers + Global Average Pooling
         x2 = self.conv_branch(cls_token_final_reshaped).flatten(1)
 
-        # Branch 3
+        # Branch 3: Another Global Average Pooling (optional)
         x3 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
 
         # Concatenate branches
-        concat = torch.cat([x1, x2], dim=1)
-        concat = torch.cat([x3, concat], dim=1)
+        concat = torch.cat([x1, x2, x3], dim=1)
 
         # Final dense layers
         output = self.final_dense(concat)
