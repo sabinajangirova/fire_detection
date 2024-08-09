@@ -27,7 +27,6 @@ class ViTWithDFA(nn.Module):
         self.vit = timm.models.vision_transformer.VisionTransformer(
             img_size=224,
             patch_size=16,
-            embed_dim=768,
             depth=config['depth'],
             num_heads=config['num_heads'],
             mlp_ratio=config['mlp_ratio'],
@@ -35,7 +34,7 @@ class ViTWithDFA(nn.Module):
             norm_layer=nn.LayerNorm,
             num_classes=0
         )
-
+        self.embed_dim = 768
         self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
         self.dense1 = nn.Sequential(
             nn.Linear(self.embed_dim, 100),
