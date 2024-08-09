@@ -197,8 +197,8 @@ criterion = nn.CrossEntropyLoss(weight=class_weights)
 # Define student model
 student_model_config = {
     'patch_size': 16,
-    'depth': 6,        # Fewer transformer layers
-    'num_heads': 6,    # Fewer attention heads
+    'depth': 4,        # Fewer transformer layers
+    'num_heads': 4,    # Fewer attention heads
     'mlp_ratio': 6.0,
     'qkv_bias': True,
     'norm_layer': torch.nn.LayerNorm,
