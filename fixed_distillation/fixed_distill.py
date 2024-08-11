@@ -134,7 +134,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'distill_vit16_fixed_19.log'
+log_file = 'distill_vit16_fixed_20.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -197,8 +197,8 @@ criterion = nn.CrossEntropyLoss(weight=class_weights)
 # Define student model
 student_model_config = {
     'patch_size': 16,
-    'depth': 2,        # Fewer transformer layers
-    'num_heads': 2,    # Fewer attention heads
+    'depth': 4,        # Fewer transformer layers
+    'num_heads': 4,    # Fewer attention heads
     'mlp_ratio': 6.0,
     'qkv_bias': True,
     'norm_layer': torch.nn.LayerNorm,
@@ -207,6 +207,11 @@ student_model_config = {
 student_model = ViTWithDFA(config=student_model_config, num_classes=num_classes)
 student_model = student_model.to(device)
 
+from torchsummary import summary
+
+logging.info(summary(model))
+logging.info(summary(student_model))
+
 logging.info(model)
 logging.info(student_model)
 
@@ -214,7 +219,7 @@ optimizer = optim.Adam(student_model.parameters(), lr=0.00001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
 distiller = Distiller(student=student_model, teacher=model)
-distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
+distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=1)
 
 num_epochs = 500
 train_losses = []
@@ -253,7 +258,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_19.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_20.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -271,11 +276,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_19.png')
+plt.savefig('losses_plot_distilled_fixed_20.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_19.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_20.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -298,7 +303,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_19.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_20.png')
 plt.close()
 
 # Save the trained student model
