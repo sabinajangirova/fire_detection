@@ -92,6 +92,61 @@ class ViTWithDFA(nn.Module):
         # Final dense layers
         output = self.final_dense(concat)
         return output
+    
+class SimpleFeedForward(nn.Module):
+    def __init__(self, dim, mlp_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, mlp_dim)
+        self.fc2 = nn.Linear(mlp_dim, dim)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
+
+class ViT(nn.Module):
+    def __init__(self, image_size, patch_size, num_classes, dim, depth, mlp_dim):
+        super().__init__()
+        num_patches = (image_size // patch_size) ** 2
+        patch_dim = 3 * patch_size ** 2
+        self.patch_size = patch_size
+
+        self.patch_embed = nn.Linear(patch_dim, dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+
+        # Replace transformer block with a simple feedforward block
+        self.layers = nn.Sequential(
+            *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
+        )
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes)
+        )
+
+    def forward(self, img):
+        patches = img.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+        patches = patches.reshape(img.shape[0], -1, 3 * self.patch_size ** 2)
+        
+        x = self.patch_embed(patches)
+        cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embed
+
+        x = self.layers(x)
+
+        x = x[:, 0]
+        return self.mlp_head(x)
+    
+def create_custom_vit(pretrained=False, num_classes=12):
+    return ViT(
+        image_size=224,
+        patch_size=16,
+        num_classes=num_classes,
+        dim=768,
+        depth=6,
+        mlp_dim=4608
+    )
 
 # Define the Distiller class
 class Distiller(nn.Module):
@@ -134,7 +189,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'distill_vit16_fixed_24.log'
+log_file = 'distill_vit16_fixed_25.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -195,16 +250,17 @@ model = model.to(device)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 
 # Define student model
-student_model_config = {
-    'patch_size': 16,
-    'depth': 4,        # Fewer transformer layers
-    'num_heads': 4,    # Fewer attention heads
-    'mlp_ratio': 6.0,
-    'qkv_bias': True,
-    'norm_layer': torch.nn.LayerNorm,
-}
+# student_model_config = {
+#     'patch_size': 16,
+#     'depth': 4,        # Fewer transformer layers
+#     'num_heads': 4,    # Fewer attention heads
+#     'mlp_ratio': 6.0,
+#     'qkv_bias': True,
+#     'norm_layer': torch.nn.LayerNorm,
+# }
 
-student_model = ViTWithDFA(config=student_model_config, num_classes=num_classes)
+# student_model = ViTWithDFA(config=student_model_config, num_classes=num_classes)
+student_model = create_custom_vit(pretrained=False, num_classes=num_classes)
 student_model = student_model.to(device)
 
 from torchsummary import summary
@@ -219,9 +275,9 @@ optimizer = optim.Adam(student_model.parameters(), lr=0.00001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
 distiller = Distiller(student=student_model, teacher=model)
-distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.9, temperature=7)
+distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
 
-num_epochs = 500
+num_epochs = 1000
 train_losses = []
 val_losses = []
 best_val_loss = float('inf')
@@ -258,7 +314,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_24.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_25.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -276,11 +332,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_24.png')
+plt.savefig('losses_plot_distilled_fixed_25.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_24.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_25.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -303,7 +359,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_24.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_25.png')
 plt.close()
 
 # Save the trained student model
