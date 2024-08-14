@@ -16,7 +16,7 @@ import timm
 from transformers import ViTFeatureExtractor
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.optimize import differential_evolution
+import torch.nn.functional as F
 
 torch.cuda.empty_cache()
 
