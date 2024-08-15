@@ -21,78 +21,50 @@ import torch.nn.functional as F
 torch.cuda.empty_cache()
 
 # Define the modified ViT model with dual fire attention
-class ViTWithDFA(nn.Module):
-    def __init__(self, model_name='vit_base_patch16_224', config=None, num_classes=12):
-        super(ViTWithDFA, self).__init__()
-        self.vit = timm.models.vision_transformer.VisionTransformer(
-            img_size=224,
-            patch_size=16,
-            depth=config['depth'],
-            num_heads=config['num_heads'],
-            mlp_ratio=config['mlp_ratio'],
-            qkv_bias=True,
-            norm_layer=nn.LayerNorm,
-            num_classes=0
-        )
-        self.embed_dim = 768
-        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.dense1 = nn.Sequential(
-            nn.Linear(self.embed_dim, 100),
-            nn.ReLU(),
-            nn.Linear(100, 50),
-            nn.ReLU(),
-            nn.BatchNorm1d(50)
-        )
 
-        self.conv_branch = nn.Sequential(
-            nn.Conv2d(self.embed_dim, 64, kernel_size=1, padding='same'),
+class ChannelAttention(nn.Module):
+    def __init__(self, in_channels, reduction_ratio=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1, bias=False),
             nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=3, padding='same'),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, kernel_size=1, padding='same'),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1),
-            nn.BatchNorm2d(64)
+            nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False)
         )
-
-        self.final_dense = nn.Sequential(
-            nn.Linear(self.embed_dim + 64 + 50, 150),  # Ensure the correct input size after concatenation
-            nn.ReLU(),
-            nn.BatchNorm1d(150),
-            nn.Linear(150, num_classes)
-        )
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
-        x = self.vit.patch_embed(x)
-        cls_token = self.vit.cls_token.expand(x.shape[0], -1, -1)
-        x = torch.cat((cls_token, x), dim=1)
-        x = x + self.vit.pos_embed
-        x = self.vit.pos_drop(x)
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out) * x
 
-        for block in self.vit.blocks:
-            x = block(x)
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv1 = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=(kernel_size - 1) // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
 
-        x = self.vit.norm(x)
-        cls_token_final = x[:, 0]
-        cls_token_final_reshaped = cls_token_final.unsqueeze(-1).unsqueeze(-1)
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x) * x
 
-        # Branch 1: Global Average Pooling + Dense Layers
-        flat1 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
-        x1 = self.dense1(flat1)
+class DualFireAttention(nn.Module):
+    def __init__(self, in_channels):
+        super(DualFireAttention, self).__init__()
+        self.channel_attention = ChannelAttention(in_channels)
+        self.spatial_attention = SpatialAttention()
 
-        # Branch 2: Convolutional Layers + Global Average Pooling
-        x2 = self.conv_branch(cls_token_final_reshaped).flatten(1)
+    def forward(self, x):
+        x = self.channel_attention(x)
+        x = self.spatial_attention(x)
+        return x
 
-        # Branch 3: Another Global Average Pooling (optional)
-        x3 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
-
-        # Concatenate branches
-        concat = torch.cat([x1, x2, x3], dim=1)
-
-        # Final dense layers
-        output = self.final_dense(concat)
-        return output
-    
 class SimpleFeedForward(nn.Module):
     def __init__(self, dim, mlp_dim):
         super().__init__()
@@ -114,6 +86,8 @@ class ViT(nn.Module):
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
 
+        self.dual_fire_attention = DualFireAttention(dim)
+
         # Replace transformer block with a simple feedforward block
         self.layers = nn.Sequential(
             *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
@@ -132,6 +106,8 @@ class ViT(nn.Module):
         cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
         x += self.pos_embed
+
+        x = self.dual_fire_attention(x)
 
         x = self.layers(x)
 
@@ -189,7 +165,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'distill_vit16_fixed_26.log'
+log_file = 'distill_vit16_fixed_27.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -275,7 +251,7 @@ optimizer = optim.Adam(student_model.parameters(), lr=0.00001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
 distiller = Distiller(student=student_model, teacher=model)
-distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.9, temperature=5)
+distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
 
 num_epochs = 1000
 train_losses = []
@@ -314,7 +290,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_26.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_27.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -332,11 +308,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_26.png')
+plt.savefig('losses_plot_distilled_fixed_27.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_26.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_27.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -359,7 +335,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_26.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_27.png')
 plt.close()
 
 # Save the trained student model
