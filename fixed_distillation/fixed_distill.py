@@ -104,8 +104,11 @@ class CustomViTModel(nn.Module):
         x1 = self.bn1(x1)
         print(f"x1 after batch normalization: {x1.shape}")
 
+        x_reshaped = x.transpose(1, 2).unsqueeze(-1)
+        print(f"x reshaped for Conv2d: {x_reshaped.shape}")
+
         # Convolutional path with separate activation functions
-        x2 = F.relu(self.conv1(x))
+        x2 = F.relu(self.conv1(x_reshaped))
         print(f"x2 after first conv layer: {x2.shape}")
 
         x2 = F.relu(self.conv2(x2))
