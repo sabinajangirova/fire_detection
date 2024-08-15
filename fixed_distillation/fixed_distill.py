@@ -75,7 +75,11 @@ class CustomViTModel(nn.Module):
         x = self.layers(x)
 
         # Global Average Pooling
-        x3 = self.global_avg_pool(x).view(x.size(0), -1)
+        x3 = self.global_avg_pool(x)  # Output shape: [batch_size, dim, 1, 1]
+        x3 = x3.view(x3.size(0), -1)  # Flatten to shape: [batch_size, dim]
+
+        # Check the shape of x3 to ensure it's correct
+        print(f"x3 shape: {x3.shape}")
 
         # Dense layers
         x1 = F.relu(self.dense1(x3))
@@ -86,17 +90,18 @@ class CustomViTModel(nn.Module):
         x2 = F.relu(self.conv1(x))
         x2 = F.relu(self.conv2(x2))
         x2 = F.relu(self.conv3(x2))
-        x2 = self.global_avg_pool(x2).view(x2.size(0), -1)
+        x2 = self.global_avg_pool(x2).view(x2.size(0), -1)  # Flatten
         x2 = self.bn2(x2)
 
         # Concatenation and final layers
         BAM = torch.cat([x1, x2], dim=1)
         BAM = torch.cat([x3, BAM], dim=1)
-        fin = F.relu(self.final_dense(BAM))
-        fin = self.final_bn(fin)
-        output = self.output_layer(fin)
+        f = F.relu(self.final_dense(BAM))
+        f = self.final_bn(f)
+        output = self.output_layer(f)
         
         return output
+
     
 def create_custom_vit(pretrained=False, num_classes=12):
     return CustomViTModel(
