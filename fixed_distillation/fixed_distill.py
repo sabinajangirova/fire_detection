@@ -92,8 +92,8 @@ class CustomViTModel(nn.Module):
         # Concatenation and final layers
         BAM = torch.cat([x1, x2], dim=1)
         BAM = torch.cat([x3, BAM], dim=1)
-        F = F.relu(self.final_dense(BAM))
-        F = self.final_bn(F)
+        fin = F.relu(self.final_dense(BAM))
+        fin = self.final_bn(fin)
         output = self.output_layer(F)
         
         return output
