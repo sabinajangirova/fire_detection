@@ -20,51 +20,6 @@ import torch.nn.functional as F
 
 torch.cuda.empty_cache()
 
-# Define the modified ViT model with dual fire attention
-
-class ChannelAttention(nn.Module):
-    def __init__(self, in_channels, reduction_ratio=16):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-        
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1, bias=False),
-            nn.ReLU(),
-            nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False)
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        out = avg_out + max_out
-        return self.sigmoid(out) * x
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        self.conv1 = nn.Conv2d(2, 1, kernel_size=kernel_size, padding=(kernel_size - 1) // 2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return self.sigmoid(x) * x
-
-class DualFireAttention(nn.Module):
-    def __init__(self, in_channels):
-        super(DualFireAttention, self).__init__()
-        self.channel_attention = ChannelAttention(in_channels)
-        self.spatial_attention = SpatialAttention()
-
-    def forward(self, x):
-        x = self.channel_attention(x)
-        x = self.spatial_attention(x)
-        return x
-
 class SimpleFeedForward(nn.Module):
     def __init__(self, dim, mlp_dim):
         super().__init__()
@@ -75,30 +30,42 @@ class SimpleFeedForward(nn.Module):
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-class ViT(nn.Module):
-    def __init__(self, image_size, patch_size, num_classes, dim, depth, mlp_dim):
-        super().__init__()
+class CustomViTModel(nn.Module):
+    def __init__(self, base_model=None, image_size=224, patch_size=16, num_classes=12, dim=768, depth=6, mlp_dim=4608):
+        super(CustomViTModel, self).__init__()
+        self.base_model = base_model
         num_patches = (image_size // patch_size) ** 2
         patch_dim = 3 * patch_size ** 2
         self.patch_size = patch_size
 
+        # Base ViT layers
         self.patch_embed = nn.Linear(patch_dim, dim)
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
 
-        self.dual_fire_attention = DualFireAttention(dim)
+        # self.dual_fire_attention = DualFireAttention(dim)
 
-        # Replace transformer block with a simple feedforward block
         self.layers = nn.Sequential(
             *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
         )
 
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_classes)
-        )
+        # Additional layers from the provided code
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.dense1 = nn.Linear(dim, 100)
+        self.dense2 = nn.Linear(100, 50)
+        self.bn1 = nn.BatchNorm1d(50)
+
+        self.conv1 = nn.Conv2d(dim, 64, kernel_size=1, padding='same', activation='relu')
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding='same', activation='relu')
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=1, padding='same', activation='relu')
+        self.bn2 = nn.BatchNorm1d(64)
+
+        self.final_dense = nn.Linear(150, 150)
+        self.final_bn = nn.BatchNorm1d(150)
+        self.output_layer = nn.Linear(150, num_classes)
 
     def forward(self, img):
+        # ViT process
         patches = img.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
         patches = patches.reshape(img.shape[0], -1, 3 * self.patch_size ** 2)
         
@@ -106,16 +73,37 @@ class ViT(nn.Module):
         cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
         x += self.pos_embed
-        x = x.transpose(1, 2)
-        x = self.dual_fire_attention(x)
-        x = x.transpose(1, 2)
+
+        # Dual Fire Attention
+        # x = self.dual_fire_attention(x)
         x = self.layers(x)
 
-        x = x[:, 0]
-        return self.mlp_head(x)
+        # Global Average Pooling
+        x3 = self.global_avg_pool(x).view(x.size(0), -1)
+
+        # Dense layers
+        x1 = F.relu(self.dense1(x3))
+        x1 = F.relu(self.dense2(x1))
+        x1 = self.bn1(x1)
+
+        # Convolutional path
+        x2 = F.relu(self.conv1(x))
+        x2 = F.relu(self.conv2(x2))
+        x2 = F.relu(self.conv3(x2))
+        x2 = self.global_avg_pool(x2).view(x2.size(0), -1)
+        x2 = self.bn2(x2)
+
+        # Concatenation and final layers
+        BAM = torch.cat([x1, x2], dim=1)
+        BAM = torch.cat([x3, BAM], dim=1)
+        F = F.relu(self.final_dense(BAM))
+        F = self.final_bn(F)
+        output = self.output_layer(F)
+        
+        return output
     
 def create_custom_vit(pretrained=False, num_classes=12):
-    return ViT(
+    return CustomViTModel(
         image_size=224,
         patch_size=16,
         num_classes=num_classes,
