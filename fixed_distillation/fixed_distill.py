@@ -58,6 +58,8 @@ class CustomViTModel(nn.Module):
         self.conv3 = nn.Conv2d(64, 64, kernel_size=1, padding='same')
         self.bn2 = nn.BatchNorm2d(64)
 
+        self.global_avg_pool_2d = nn.AdaptiveAvgPool2d((1, 1))
+
         self.final_dense = nn.Linear(150, 150)
         self.final_bn = nn.BatchNorm1d(150)
         self.output_layer = nn.Linear(150, num_classes)
@@ -83,15 +85,15 @@ class CustomViTModel(nn.Module):
 
         x += self.pos_embed
         print(f"x after adding positional embedding: {x.shape}")
-
+        
         x = self.layers(x)
         print(f"x after transformer layers: {x.shape}")
 
-        # Global Average Pooling
-        x3 = self.global_avg_pool(x.transpose(1, 2))
+        # Global Average Pooling across the feature dimension
+        x3 = self.global_avg_pool_1d(x.transpose(1, 2))  # Transpose to [batch_size, 768, 197]
         print(f"x3 after global average pooling: {x3.shape}")
-        
-        x3 = x3.view(x3.size(0), -1)
+
+        x3 = x3.view(x3.size(0), -1)  # Flatten to [batch_size, 768]
         print(f"x3 after flattening: {x3.shape}")
 
         # Dense layers
@@ -104,7 +106,8 @@ class CustomViTModel(nn.Module):
         x1 = self.bn1(x1)
         print(f"x1 after batch normalization: {x1.shape}")
 
-        x_reshaped = x.transpose(1, 2).unsqueeze(-1)
+        # Reshape x to prepare it for Conv2d layers
+        x_reshaped = x.transpose(1, 2).unsqueeze(-1)  # [batch_size, dim, seq_len, 1]
         print(f"x reshaped for Conv2d: {x_reshaped.shape}")
 
         # Convolutional path with separate activation functions
@@ -117,7 +120,8 @@ class CustomViTModel(nn.Module):
         x2 = F.relu(self.conv3(x2))
         print(f"x2 after third conv layer: {x2.shape}")
 
-        x2 = self.global_avg_pool(x2).view(x2.size(0), -1)
+        # Apply AdaptiveAvgPool2d instead of AdaptiveAvgPool1d
+        x2 = self.global_avg_pool_2d(x2).view(x2.size(0), -1)
         print(f"x2 after global average pooling and flattening: {x2.shape}")
 
         x2 = self.bn2(x2)
