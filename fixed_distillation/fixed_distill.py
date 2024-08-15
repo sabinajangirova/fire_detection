@@ -61,7 +61,6 @@ class DualFireAttention(nn.Module):
         self.spatial_attention = SpatialAttention()
 
     def forward(self, x):
-        x = x.transpose(1, 2).unsqueeze(-1)
         x = self.channel_attention(x)
         x = self.spatial_attention(x)
         return x
@@ -107,9 +106,9 @@ class ViT(nn.Module):
         cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
         x += self.pos_embed
-
+        x = x.transpose(1, 2)
         x = self.dual_fire_attention(x)
-
+        x = x.transpose(1, 2)
         x = self.layers(x)
 
         x = x[:, 0]
