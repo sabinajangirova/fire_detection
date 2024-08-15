@@ -61,6 +61,7 @@ class DualFireAttention(nn.Module):
         self.spatial_attention = SpatialAttention()
 
     def forward(self, x):
+        x = x.transpose(1, 2).unsqueeze(-1)
         x = self.channel_attention(x)
         x = self.spatial_attention(x)
         return x
