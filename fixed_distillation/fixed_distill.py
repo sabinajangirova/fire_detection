@@ -88,7 +88,7 @@ class CustomViTModel(nn.Module):
         print(f"x after transformer layers: {x.shape}")
 
         # Global Average Pooling
-        x3 = self.global_avg_pool(x)
+        x3 = self.global_avg_pool(x.transpose(1, 2))
         print(f"x3 after global average pooling: {x3.shape}")
         
         x3 = x3.view(x3.size(0), -1)
