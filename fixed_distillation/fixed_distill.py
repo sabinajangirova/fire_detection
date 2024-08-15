@@ -48,7 +48,7 @@ class CustomViTModel(nn.Module):
         )
 
         # Additional layers from the provided code
-        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
         self.dense1 = nn.Linear(dim, 100)
         self.dense2 = nn.Linear(100, 50)
         self.bn1 = nn.BatchNorm1d(50)
