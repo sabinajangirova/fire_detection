@@ -73,9 +73,10 @@ class CustomViTModel(nn.Module):
         x += self.pos_embed
 
         x = self.layers(x)
-
+        print(f"x shape before pooling: {x.shape}")
         # Global Average Pooling
         x3 = self.global_avg_pool(x)  # Output shape: [batch_size, dim, 1, 1]
+        print(f"x3 shape after pooling: {x3.shape}")
         x3 = x3.view(x3.size(0), -1)  # Flatten to shape: [batch_size, dim]
 
         # Check the shape of x3 to ensure it's correct
