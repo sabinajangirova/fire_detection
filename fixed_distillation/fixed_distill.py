@@ -63,43 +63,78 @@ class CustomViTModel(nn.Module):
         self.output_layer = nn.Linear(150, num_classes)
 
     def forward(self, img):
+        print(f"Input shape: {img.shape}")
+
         # ViT process
         patches = img.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+        print(f"Patches shape: {patches.shape}")
+
         patches = patches.reshape(img.shape[0], -1, 3 * self.patch_size ** 2)
+        print(f"Patches reshaped: {patches.shape}")
         
         x = self.patch_embed(patches)
+        print(f"x after patch embedding: {x.shape}")
+
         cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
+        print(f"CLS tokens shape: {cls_tokens.shape}")
+
         x = torch.cat((cls_tokens, x), dim=1)
+        print(f"x after concatenating CLS tokens: {x.shape}")
+
         x += self.pos_embed
+        print(f"x after adding positional embedding: {x.shape}")
 
         x = self.layers(x)
-        print(f"x shape before pooling: {x.shape}")
-        # Global Average Pooling
-        x3 = self.global_avg_pool(x)  # Output shape: [batch_size, dim, 1, 1]
-        print(f"x3 shape after pooling: {x3.shape}")
-        x3 = x3.view(x3.size(0), -1)  # Flatten to shape: [batch_size, dim]
+        print(f"x after transformer layers: {x.shape}")
 
-        # Check the shape of x3 to ensure it's correct
-        print(f"x3 shape: {x3.shape}")
+        # Global Average Pooling
+        x3 = self.global_avg_pool(x)
+        print(f"x3 after global average pooling: {x3.shape}")
+        
+        x3 = x3.view(x3.size(0), -1)
+        print(f"x3 after flattening: {x3.shape}")
 
         # Dense layers
         x1 = F.relu(self.dense1(x3))
+        print(f"x1 after first dense layer: {x1.shape}")
+
         x1 = F.relu(self.dense2(x1))
+        print(f"x1 after second dense layer: {x1.shape}")
+
         x1 = self.bn1(x1)
+        print(f"x1 after batch normalization: {x1.shape}")
 
         # Convolutional path with separate activation functions
         x2 = F.relu(self.conv1(x))
+        print(f"x2 after first conv layer: {x2.shape}")
+
         x2 = F.relu(self.conv2(x2))
+        print(f"x2 after second conv layer: {x2.shape}")
+
         x2 = F.relu(self.conv3(x2))
-        x2 = self.global_avg_pool(x2).view(x2.size(0), -1)  # Flatten
+        print(f"x2 after third conv layer: {x2.shape}")
+
+        x2 = self.global_avg_pool(x2).view(x2.size(0), -1)
+        print(f"x2 after global average pooling and flattening: {x2.shape}")
+
         x2 = self.bn2(x2)
+        print(f"x2 after batch normalization: {x2.shape}")
 
         # Concatenation and final layers
         BAM = torch.cat([x1, x2], dim=1)
+        print(f"BAM after concatenating x1 and x2: {BAM.shape}")
+
         BAM = torch.cat([x3, BAM], dim=1)
-        f = F.relu(self.final_dense(BAM))
-        f = self.final_bn(f)
-        output = self.output_layer(f)
+        print(f"BAM after concatenating x3: {BAM.shape}")
+
+        fin = F.relu(self.final_dense(BAM))
+        print(f"F after final dense layer: {fin.shape}")
+
+        fin = self.final_bn(fin)
+        print(f"F after final batch normalization: {fin.shape}")
+
+        output = self.output_layer(fin)
+        print(f"Output shape: {output.shape}")
         
         return output
 
