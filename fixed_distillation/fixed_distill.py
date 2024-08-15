@@ -43,8 +43,6 @@ class CustomViTModel(nn.Module):
         self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim))
         self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
 
-        # self.dual_fire_attention = DualFireAttention(dim)
-
         self.layers = nn.Sequential(
             *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
         )
@@ -55,10 +53,10 @@ class CustomViTModel(nn.Module):
         self.dense2 = nn.Linear(100, 50)
         self.bn1 = nn.BatchNorm1d(50)
 
-        self.conv1 = nn.Conv2d(dim, 64, kernel_size=1, padding='same', activation='relu')
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding='same', activation='relu')
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=1, padding='same', activation='relu')
-        self.bn2 = nn.BatchNorm1d(64)
+        self.conv1 = nn.Conv2d(dim, 64, kernel_size=1, padding='same')
+        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding='same')
+        self.conv3 = nn.Conv2d(64, 64, kernel_size=1, padding='same')
+        self.bn2 = nn.BatchNorm2d(64)
 
         self.final_dense = nn.Linear(150, 150)
         self.final_bn = nn.BatchNorm1d(150)
@@ -74,8 +72,6 @@ class CustomViTModel(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1)
         x += self.pos_embed
 
-        # Dual Fire Attention
-        # x = self.dual_fire_attention(x)
         x = self.layers(x)
 
         # Global Average Pooling
@@ -86,7 +82,7 @@ class CustomViTModel(nn.Module):
         x1 = F.relu(self.dense2(x1))
         x1 = self.bn1(x1)
 
-        # Convolutional path
+        # Convolutional path with separate activation functions
         x2 = F.relu(self.conv1(x))
         x2 = F.relu(self.conv2(x2))
         x2 = F.relu(self.conv3(x2))
