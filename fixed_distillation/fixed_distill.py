@@ -94,7 +94,7 @@ class CustomViTModel(nn.Module):
         BAM = torch.cat([x3, BAM], dim=1)
         fin = F.relu(self.final_dense(BAM))
         fin = self.final_bn(fin)
-        output = self.output_layer(F)
+        output = self.output_layer(fin)
         
         return output
     
