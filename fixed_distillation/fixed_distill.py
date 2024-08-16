@@ -20,140 +20,16 @@ import torch.nn.functional as F
 
 torch.cuda.empty_cache()
 
-class SimpleFeedForward(nn.Module):
-    def __init__(self, dim, mlp_dim):
-        super().__init__()
-        self.fc1 = nn.Linear(dim, mlp_dim)
-        self.fc2 = nn.Linear(mlp_dim, dim)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
-
-class CustomViTModel(nn.Module):
-    def __init__(self, base_model=None, image_size=224, patch_size=16, num_classes=12, dim=768, depth=6, mlp_dim=4608):
-        super(CustomViTModel, self).__init__()
-        self.base_model = base_model
-        num_patches = (image_size // patch_size) ** 2
-        patch_dim = 3 * patch_size ** 2
-        self.patch_size = patch_size
-
-        # Base ViT layers
-        self.patch_embed = nn.Linear(patch_dim, dim)
-        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim))
-        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
-
-        self.layers = nn.Sequential(
-            *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
-        )
-
-        # Additional layers from the provided code
-        self.global_avg_pool = nn.AdaptiveAvgPool1d(1)
-        self.dense1 = nn.Linear(dim, 100)
-        self.dense2 = nn.Linear(100, 50)
-        self.bn1 = nn.BatchNorm1d(50)
-
-        self.conv1 = nn.Conv2d(dim, 64, kernel_size=1, padding='same')
-        self.conv2 = nn.Conv2d(64, 64, kernel_size=3, padding='same')
-        self.conv3 = nn.Conv2d(64, 64, kernel_size=1, padding='same')
-        self.bn2 = nn.BatchNorm2d(64)
-
-        self.global_avg_pool_2d = nn.AdaptiveAvgPool2d((1, 1))
-
-        self.final_dense = nn.Linear(150, 150)
-        self.final_bn = nn.BatchNorm1d(150)
-        self.output_layer = nn.Linear(150, num_classes)
-
-    def forward(self, img):
-        print(f"Input shape: {img.shape}")
-
-        # ViT process
-        patches = img.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
-        print(f"Patches shape: {patches.shape}")
-
-        patches = patches.reshape(img.shape[0], -1, 3 * self.patch_size ** 2)
-        print(f"Patches reshaped: {patches.shape}")
-        
-        x = self.patch_embed(patches)
-        print(f"x after patch embedding: {x.shape}")
-
-        cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
-        print(f"CLS tokens shape: {cls_tokens.shape}")
-
-        x = torch.cat((cls_tokens, x), dim=1)
-        print(f"x after concatenating CLS tokens: {x.shape}")
-
-        x += self.pos_embed
-        print(f"x after adding positional embedding: {x.shape}")
-        
-        x = self.layers(x)
-        print(f"x after transformer layers: {x.shape}")
-
-        # Global Average Pooling across the feature dimension
-        x3 = self.global_avg_pool_1d(x.transpose(1, 2))  # Transpose to [batch_size, 768, 197]
-        print(f"x3 after global average pooling: {x3.shape}")
-
-        x3 = x3.view(x3.size(0), -1)  # Flatten to [batch_size, 768]
-        print(f"x3 after flattening: {x3.shape}")
-
-        # Dense layers
-        x1 = F.relu(self.dense1(x3))
-        print(f"x1 after first dense layer: {x1.shape}")
-
-        x1 = F.relu(self.dense2(x1))
-        print(f"x1 after second dense layer: {x1.shape}")
-
-        x1 = self.bn1(x1)
-        print(f"x1 after batch normalization: {x1.shape}")
-
-        # Reshape x to prepare it for Conv2d layers
-        x_reshaped = x.transpose(1, 2).unsqueeze(-1)  # [batch_size, dim, seq_len, 1]
-        print(f"x reshaped for Conv2d: {x_reshaped.shape}")
-
-        # Convolutional path with separate activation functions
-        x2 = F.relu(self.conv1(x_reshaped))
-        print(f"x2 after first conv layer: {x2.shape}")
-
-        x2 = F.relu(self.conv2(x2))
-        print(f"x2 after second conv layer: {x2.shape}")
-
-        x2 = F.relu(self.conv3(x2))
-        print(f"x2 after third conv layer: {x2.shape}")
-
-        # Apply AdaptiveAvgPool2d instead of AdaptiveAvgPool1d
-        x2 = self.global_avg_pool_2d(x2).view(x2.size(0), -1)
-        print(f"x2 after global average pooling and flattening: {x2.shape}")
-
-        x2 = self.bn2(x2)
-        print(f"x2 after batch normalization: {x2.shape}")
-
-        # Concatenation and final layers
-        BAM = torch.cat([x1, x2], dim=1)
-        print(f"BAM after concatenating x1 and x2: {BAM.shape}")
-
-        BAM = torch.cat([x3, BAM], dim=1)
-        print(f"BAM after concatenating x3: {BAM.shape}")
-
-        fin = F.relu(self.final_dense(BAM))
-        print(f"F after final dense layer: {fin.shape}")
-
-        fin = self.final_bn(fin)
-        print(f"F after final batch normalization: {fin.shape}")
-
-        output = self.output_layer(fin)
-        print(f"Output shape: {output.shape}")
-        
-        return output
-
-    
-def create_custom_vit(pretrained=False, num_classes=12):
-    return CustomViTModel(
-        image_size=224,
-        patch_size=16,
-        num_classes=num_classes,
-        dim=768,
-        depth=6,
-        mlp_dim=4608
+def create_custom_vit(config, num_classes):
+    return timm.models.vision_transformer.VisionTransformer(
+        img_size=224,
+        patch_size=config['patch_size'],
+        depth=config['depth'],
+        num_heads=config['num_heads'],
+        mlp_ratio=config['mlp_ratio'],
+        qkv_bias=config['qkv_bias'],
+        norm_layer=config['norm_layer'],
+        num_classes=num_classes
     )
 
 # Define the Distiller class
@@ -258,17 +134,16 @@ model = model.to(device)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 
 # Define student model
-# student_model_config = {
-#     'patch_size': 16,
-#     'depth': 4,        # Fewer transformer layers
-#     'num_heads': 4,    # Fewer attention heads
-#     'mlp_ratio': 6.0,
-#     'qkv_bias': True,
-#     'norm_layer': torch.nn.LayerNorm,
-# }
+student_model_config = {
+    'patch_size': 16,
+    'depth': 1,        # Fewer transformer layers
+    'num_heads': 1,    # Fewer attention heads
+    'mlp_ratio': 6.0,
+    'qkv_bias': True,
+    'norm_layer': torch.nn.LayerNorm,
+}
 
-# student_model = ViTWithDFA(config=student_model_config, num_classes=num_classes)
-student_model = create_custom_vit(pretrained=False, num_classes=num_classes)
+student_model = create_custom_vit(config=student_model_config, num_classes=num_classes)
 student_model = student_model.to(device)
 
 from torchsummary import summary
@@ -285,7 +160,7 @@ distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 distiller = Distiller(student=student_model, teacher=model)
 distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
 
-num_epochs = 1000
+num_epochs = 500
 train_losses = []
 val_losses = []
 best_val_loss = float('inf')
