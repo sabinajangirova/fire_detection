@@ -20,16 +20,132 @@ import torch.nn.functional as F
 
 torch.cuda.empty_cache()
 
-def create_custom_vit(config, num_classes):
-    return timm.models.vision_transformer.VisionTransformer(
-        img_size=224,
-        patch_size=config['patch_size'],
-        depth=config['depth'],
-        num_heads=config['num_heads'],
-        mlp_ratio=config['mlp_ratio'],
-        qkv_bias=config['qkv_bias'],
-        norm_layer=config['norm_layer'],
-        num_classes=num_classes
+# Define the modified ViT model with dual fire attention
+class ViTWithDFA(nn.Module):
+    def __init__(self, model_name='vit_base_patch16_224', config=None, num_classes=12):
+        super(ViTWithDFA, self).__init__()
+        self.vit = timm.models.vision_transformer.VisionTransformer(
+            img_size=224,
+            patch_size=16,
+            depth=config['depth'],
+            num_heads=config['num_heads'],
+            mlp_ratio=config['mlp_ratio'],
+            qkv_bias=True,
+            norm_layer=nn.LayerNorm,
+            num_classes=0
+        )
+        self.embed_dim = 768
+        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.dense1 = nn.Sequential(
+            nn.Linear(self.embed_dim, 100),
+            nn.ReLU(),
+            nn.Linear(100, 50),
+            nn.ReLU(),
+            nn.BatchNorm1d(50)
+        )
+
+        self.conv_branch = nn.Sequential(
+            nn.Conv2d(self.embed_dim, 64, kernel_size=1, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=1, padding='same'),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.BatchNorm2d(64)
+        )
+
+        self.final_dense = nn.Sequential(
+            nn.Linear(self.embed_dim + 64 + 50, 150),  # Ensure the correct input size after concatenation
+            nn.ReLU(),
+            nn.BatchNorm1d(150),
+            nn.Linear(150, num_classes)
+        )
+
+    def forward(self, x):
+        x = self.vit.patch_embed(x)
+        cls_token = self.vit.cls_token.expand(x.shape[0], -1, -1)
+        x = torch.cat((cls_token, x), dim=1)
+        x = x + self.vit.pos_embed
+        x = self.vit.pos_drop(x)
+
+        for block in self.vit.blocks:
+            x = block(x)
+
+        x = self.vit.norm(x)
+        cls_token_final = x[:, 0]
+        cls_token_final_reshaped = cls_token_final.unsqueeze(-1).unsqueeze(-1)
+
+        # Branch 1: Global Average Pooling + Dense Layers
+        flat1 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
+        x1 = self.dense1(flat1)
+
+        # Branch 2: Convolutional Layers + Global Average Pooling
+        x2 = self.conv_branch(cls_token_final_reshaped).flatten(1)
+
+        # Branch 3: Another Global Average Pooling (optional)
+        x3 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
+
+        # Concatenate branches
+        concat = torch.cat([x1, x2, x3], dim=1)
+
+        # Final dense layers
+        output = self.final_dense(concat)
+        return output
+    
+class SimpleFeedForward(nn.Module):
+    def __init__(self, dim, mlp_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, mlp_dim)
+        self.fc2 = nn.Linear(mlp_dim, dim)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
+
+class ViT(nn.Module):
+    def __init__(self, image_size, patch_size, num_classes, dim, depth, mlp_dim):
+        super().__init__()
+        num_patches = (image_size // patch_size) ** 2
+        patch_dim = 3 * patch_size ** 2
+        self.patch_size = patch_size
+
+        self.patch_embed = nn.Linear(patch_dim, dim)
+        self.pos_embed = nn.Parameter(torch.randn(1, num_patches + 1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+
+        # Replace transformer block with a simple feedforward block
+        self.layers = nn.Sequential(
+            *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
+        )
+
+        self.mlp_head = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, num_classes)
+        )
+
+    def forward(self, img):
+        patches = img.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
+        patches = patches.reshape(img.shape[0], -1, 3 * self.patch_size ** 2)
+        
+        x = self.patch_embed(patches)
+        cls_tokens = self.cls_token.expand(img.shape[0], -1, -1)
+        x = torch.cat((cls_tokens, x), dim=1)
+        x += self.pos_embed
+
+        x = self.layers(x)
+
+        x = x[:, 0]
+        return self.mlp_head(x)
+    
+def create_custom_vit(pretrained=False, num_classes=12):
+    return ViT(
+        image_size=224,
+        patch_size=16,
+        num_classes=num_classes,
+        dim=768,
+        depth=6,
+        mlp_dim=4608
     )
 
 # Define the Distiller class
@@ -73,7 +189,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'distill_vit16_fixed_28.log'
+log_file = 'distill_vit16_fixed_34.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -111,7 +227,7 @@ data_transforms = {
 # Load the datasets with ImageFolder
 data_dir = '~/fire_detection/fire_detection/dataset'
 image_datasets = {x: datasets.ImageFolder(os.path.join(data_dir, x), data_transforms[x]) for x in ['train', 'val']}
-dataloaders = {x: DataLoader(image_datasets[x], batch_size=16, shuffle=True, num_workers=4) for x in ['train', 'val']}
+dataloaders = {x: DataLoader(image_datasets[x], batch_size=32, shuffle=True, num_workers=4) for x in ['train', 'val']}
 dataset_sizes = {x: len(image_datasets[x]) for x in ['train', 'val']}
 class_names = image_datasets['train'].classes
 num_classes = len(class_names)
@@ -134,16 +250,17 @@ model = model.to(device)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 
 # Define student model
-student_model_config = {
-    'patch_size': 16,
-    'depth': 1,        # Fewer transformer layers
-    'num_heads': 1,    # Fewer attention heads
-    'mlp_ratio': 6.0,
-    'qkv_bias': True,
-    'norm_layer': torch.nn.LayerNorm,
-}
+# student_model_config = {
+#     'patch_size': 16,
+#     'depth': 4,        # Fewer transformer layers
+#     'num_heads': 4,    # Fewer attention heads
+#     'mlp_ratio': 6.0,
+#     'qkv_bias': True,
+#     'norm_layer': torch.nn.LayerNorm,
+# }
 
-student_model = create_custom_vit(config=student_model_config, num_classes=num_classes)
+# student_model = ViTWithDFA(config=student_model_config, num_classes=num_classes)
+student_model = create_custom_vit(pretrained=False, num_classes=num_classes)
 student_model = student_model.to(device)
 
 from torchsummary import summary
@@ -154,11 +271,11 @@ logging.info(summary(student_model))
 logging.info(model)
 logging.info(student_model)
 
-optimizer = optim.Adam(student_model.parameters(), lr=0.00001)
+optimizer = optim.Adam(student_model.parameters(), lr=0.0001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
 distiller = Distiller(student=student_model, teacher=model)
-distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
+distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.7, temperature=5)
 
 num_epochs = 1000
 train_losses = []
@@ -197,7 +314,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_28.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_34.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -215,11 +332,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_28.png')
+plt.savefig('losses_plot_distilled_fixed_34.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_28.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_34.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -242,7 +359,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_28.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_34.png')
 plt.close()
 
 # Save the trained student model
