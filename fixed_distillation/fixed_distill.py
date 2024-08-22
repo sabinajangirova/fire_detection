@@ -37,11 +37,11 @@ class ViTWithDFA(nn.Module):
         self.embed_dim = 768
         self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
         self.dense1 = nn.Sequential(
-            nn.Linear(self.embed_dim, 100),
+            nn.Linear(self.embed_dim, self.embed_dim*4),
             nn.ReLU(),
-            nn.Linear(100, 50),
+            nn.Linear(self.embed_dim*4, self.embed_dim*2),
             nn.ReLU(),
-            nn.BatchNorm1d(50)
+            nn.BatchNorm1d(self.embed_dim*2)
         )
 
         self.conv_branch = nn.Sequential(
@@ -56,7 +56,7 @@ class ViTWithDFA(nn.Module):
         )
 
         self.final_dense = nn.Sequential(
-            nn.Linear(self.embed_dim + 64 + 50, 150),  # Ensure the correct input size after concatenation
+            nn.Linear(self.embed_dim + 64 + self.embed_dim*2, 150),  # Ensure the correct input size after concatenation
             nn.ReLU(),
             nn.BatchNorm1d(150),
             nn.Linear(150, num_classes)
@@ -189,7 +189,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'distill_vit16_fixed_34.log'
+log_file = 'distill_vit16_fixed_35.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -314,7 +314,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_34.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_35.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -332,11 +332,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_34.png')
+plt.savefig('losses_plot_distilled_fixed_35.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_34.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_35.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -359,7 +359,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_34.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_35.png')
 plt.close()
 
 # Save the trained student model
