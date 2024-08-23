@@ -119,10 +119,38 @@ class ViT(nn.Module):
             *[SimpleFeedForward(dim, mlp_dim) for _ in range(depth)]
         )
 
-        self.mlp_head = nn.Sequential(
-            nn.LayerNorm(dim),
-            nn.Linear(dim, num_classes)
+        self.embed_dim = 768
+        self.global_avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.dense1 = nn.Sequential(
+            nn.Linear(self.embed_dim, 100),
+            nn.ReLU(),
+            nn.Linear(100, 50),
+            nn.ReLU(),
+            nn.BatchNorm1d(50)
         )
+
+        self.conv_branch = nn.Sequential(
+            nn.Conv2d(self.embed_dim, 64, kernel_size=1, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, padding='same'),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=1, padding='same'),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.BatchNorm2d(64)
+        )
+
+        self.final_dense = nn.Sequential(
+            nn.Linear(self.embed_dim + 64 + 50, 150),  # Ensure the correct input size after concatenation
+            nn.ReLU(),
+            nn.BatchNorm1d(150),
+            nn.Linear(150, num_classes)
+        )
+
+        # self.mlp_head = nn.Sequential(
+        #     nn.LayerNorm(dim),
+        #     nn.Linear(dim, num_classes)
+        # )
 
     def forward(self, img):
         patches = img.unfold(2, self.patch_size, self.patch_size).unfold(3, self.patch_size, self.patch_size)
@@ -135,8 +163,25 @@ class ViT(nn.Module):
 
         x = self.layers(x)
 
-        x = x[:, 0]
-        return self.mlp_head(x)
+        # x = x[:, 0]
+        cls_token_final = x[:, 0]
+        cls_token_final_reshaped = cls_token_final.unsqueeze(-1).unsqueeze(-1)
+        flat1 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
+        x1 = self.dense1(flat1)
+
+        # Branch 2: Convolutional Layers + Global Average Pooling
+        x2 = self.conv_branch(cls_token_final_reshaped).flatten(1)
+
+        # Branch 3: Another Global Average Pooling (optional)
+        x3 = self.global_avg_pool(cls_token_final_reshaped).flatten(1)
+
+        # Concatenate branches
+        concat = torch.cat([x1, x2, x3], dim=1)
+
+        # Final dense layers
+        output = self.final_dense(concat)
+        return output
+        # return self.mlp_head(x)
     
 def create_custom_vit(pretrained=False, num_classes=12):
     return ViT(
@@ -189,7 +234,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'distill_vit16_fixed_35.log'
+log_file = 'distill_vit16_fixed_36.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -314,7 +359,7 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_35.pth')
+        torch.save(student_model.state_dict(), '/tmp/best_student_vit16_model_fixed_36.pth')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -332,11 +377,11 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('losses_plot_distilled_fixed_35.png')
+plt.savefig('losses_plot_distilled_fixed_36.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_35.pth'))
+student_model.load_state_dict(torch.load('/tmp/best_student_vit16_model_fixed_36.pth'))
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -359,7 +404,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('best_model_confusion_matrix_distilled_fixed_35.png')
+plt.savefig('best_model_confusion_matrix_distilled_fixed_36.png')
 plt.close()
 
 # Save the trained student model
