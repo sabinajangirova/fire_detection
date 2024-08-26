@@ -22,7 +22,7 @@ from torchsummary import summary
 
 torch.cuda.empty_cache()
 
-log_file = 'distill_vit16_fixed_38.log'
+log_file = 'mobilevit_xx_small_38.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -37,23 +37,22 @@ def log_system_usage():
 logging.info("Starting distillation...")
 
 # Load the pre-trained ViT feature extractor
-feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
+# feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
+model_name_or_path = 'apple/mobilevit-xx-small'
+feature_extractor = MobileViTFeatureExtractor.from_pretrained(model_name_or_path)
 
 data_transforms = {
     'train': transforms.Compose([
-        transforms.RandomResizedCrop(224),
+        transforms.Resize((256, 256)),
+        transforms.RandomCrop((224, 224)),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.2),
-        transforms.RandomGrayscale(p=0.1),
         transforms.ToTensor(),
-        transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
+        transforms.Normalize(mean=feature_extractor.mean, std=feature_extractor.std),
     ]),
     'val': transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std)
+        transforms.Normalize(mean=feature_extractor.mean, std=feature_extractor.std),
     ]),
 }
 
@@ -64,10 +63,17 @@ val_dataset = datasets.ImageFolder(root=data_dir+'/val', transform=data_transfor
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
-# Load the MobileViT model pre-trained on ImageNet
+labels = train_dataset.features["label"].names
+label2id, id2label = dict(), dict()
+for i, label in enumerate(labels):
+    label2id[label] = i
+    id2label[i] = label
+
 model = MobileViTForImageClassification.from_pretrained(
-    'apple/mobilevit-xx-small',
-    num_labels=12
+    model_name_or_path,
+    num_labels=len(train_dataset.classes),
+    id2label={str(i): c for i, c in enumerate(labels)},
+    label2id={c: str(i) for i, c in enumerate(labels)}
 )
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = model.to(device)
@@ -132,7 +138,7 @@ for epoch in range(num_epochs):
     # Save the model if validation loss has decreased
     if val_loss < best_val_loss:
         best_val_loss = val_loss
-        model.save_pretrained('best_mobilevit_xs')
+        model.save_pretrained('best_mobilevit_xxs')
         best_preds = all_preds
         best_labels = all_labels
 
@@ -144,7 +150,7 @@ plt.xlabel('Epochs')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Loss')
-plt.savefig('losses_plot_mobilevit.png')
+plt.savefig('losses_plot_mobilevit_xxs.png')
 plt.close()
 
 # Generate confusion matrix and classification report
@@ -156,7 +162,7 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=train_da
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Confusion Matrix')
-plt.savefig('confusion_matrix_mobilevit.png')
+plt.savefig('confusion_matrix_mobilevit_xxs.png')
 plt.close()
 
 print('Classification Report:')
