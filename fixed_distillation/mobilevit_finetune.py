@@ -14,7 +14,7 @@ import numpy as np
 import copy
 import timm
 from transformers import ViTFeatureExtractor
-from transformers import MobileViTForImageClassification, MobileViTFeatureExtractor
+from transformers import AutoImageProcessor, AutoModelForImageClassification
 import matplotlib.pyplot as plt
 import seaborn as sns
 import torch.nn.functional as F
@@ -39,7 +39,7 @@ logging.info("Starting distillation...")
 # Load the pre-trained ViT feature extractor
 # feature_extractor = ViTFeatureExtractor.from_pretrained('google/vit-base-patch16-224-in21k')
 model_name_or_path = 'apple/mobilevit-xx-small'
-feature_extractor = MobileViTFeatureExtractor.from_pretrained(model_name_or_path)
+feature_extractor = AutoImageProcessor.from_pretrained(model_name_or_path)
 
 data_transforms = {
     'train': transforms.Compose([
@@ -47,12 +47,12 @@ data_transforms = {
         transforms.RandomCrop((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=feature_extractor.mean, std=feature_extractor.std),
+        transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
     ]),
     'val': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=feature_extractor.mean, std=feature_extractor.std),
+        transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
     ]),
 }
 
@@ -69,8 +69,9 @@ for i, label in enumerate(labels):
     label2id[label] = i
     id2label[i] = label
 
-model = MobileViTForImageClassification.from_pretrained(
+model = AutoModelForImageClassification.from_pretrained(
     model_name_or_path,
+    ignore_mismatched_sizes=True,
     num_labels=len(train_dataset.classes),
     id2label={str(i): c for i, c in enumerate(labels)},
     label2id={c: str(i) for i, c in enumerate(labels)}
@@ -139,6 +140,7 @@ for epoch in range(num_epochs):
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         model.save_pretrained('best_mobilevit_xxs')
+        feature_extractor.save_pretrained('best_mobilevit_xxs')
         best_preds = all_preds
         best_labels = all_labels
 
