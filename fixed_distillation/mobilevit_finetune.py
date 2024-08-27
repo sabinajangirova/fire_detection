@@ -47,12 +47,10 @@ data_transforms = {
         transforms.RandomCrop((224, 224)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
     ]),
     'val': transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=feature_extractor.image_mean, std=feature_extractor.image_std),
     ]),
 }
 
@@ -63,7 +61,7 @@ val_dataset = datasets.ImageFolder(root=data_dir+'/val', transform=data_transfor
 train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
 
-labels = train_dataset.features["label"].names
+labels = train_dataset.classes
 label2id, id2label = dict(), dict()
 for i, label in enumerate(labels):
     label2id[label] = i
@@ -88,19 +86,22 @@ class_weights = torch.tensor(class_weights, dtype=torch.float).to(device)
 criterion = nn.CrossEntropyLoss(weight=class_weights)
 optimizer = torch.optim.AdamW(model.parameters(), lr=0.0001)
 
+logging.info(device)
 logging.info(model)
 logging.info(summary(model))
 
 # Training and validation loop
-num_epochs = 100
+num_epochs = 1
 best_val_loss = float('inf')
 train_losses = []
 val_losses = []
 
 for epoch in range(num_epochs):
+    logging.info(f'Epoch {epoch+1}/{num_epochs}')
     model.train()
     running_loss = 0.0
     for images, labels in train_loader:
+        logging.info(f'Batch shape: {images.shape}')
         images, labels = images.to(device), labels.to(device)
         
         optimizer.zero_grad()
@@ -120,6 +121,7 @@ for epoch in range(num_epochs):
     all_labels = []
     all_preds = []
     with torch.no_grad():
+        logging.info('Validation phase')
         for images, labels in val_loader:
             images, labels = images.to(device), labels.to(device)
             outputs = model(images).logits
