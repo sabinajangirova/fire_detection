@@ -38,8 +38,8 @@ class Distiller(nn.Module):
     def train_step(self, data):
         x, y = data
         with torch.no_grad():
-            teacher_predictions = self.teacher(x)
-        student_predictions = self.student(x)
+            teacher_predictions = self.teacher(x).logits  # Extract logits from the teacher
+        student_predictions = self.student(x).logits  # Extract logits from the student
         student_loss = self.student_loss_fn(student_predictions, y)
         distillation_loss = self.distillation_loss_fn(
             torch.log_softmax(student_predictions / self.temperature, dim=1),
@@ -56,7 +56,7 @@ class Distiller(nn.Module):
     def test_step(self, data):
         x, y = data
         with torch.no_grad():
-            y_pred = self.student(x)
+            y_pred = self.student(x).logits  # Extract logits from the student
         student_loss = self.student_loss_fn(y_pred, y)
         logging.info(f"Test - Student Loss: {student_loss.item()}")
         return {"student_loss": student_loss.item()}
