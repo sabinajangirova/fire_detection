@@ -38,7 +38,7 @@ class Distiller(nn.Module):
     def train_step(self, data):
         x, y = data
         with torch.no_grad():
-            teacher_predictions = self.teacher(x).logits  # Extract logits from the teacher
+            teacher_predictions = self.teacher(x)  # Directly use the output tensor from the teacher
         student_predictions = self.student(x).logits  # Extract logits from the student
         student_loss = self.student_loss_fn(student_predictions, y)
         distillation_loss = self.distillation_loss_fn(
@@ -130,7 +130,7 @@ teacher_model = timm.create_model('vit_base_patch16_224', pretrained=False, num_
 checkpoint_path = '/fsx/homes/Sabina.Jangirova@mbzuai.ac.ae/fire_detection/fire_detection/best_vit_model_weights_vit16_50_epochs.pth'
 state_dict = torch.load(checkpoint_path, map_location='cpu')
 teacher_model.load_state_dict(state_dict)
-model = teacher_model.to(device)
+teacher_model = teacher_model.to(device)
 
 # Define loss function and optimizer
 criterion = nn.CrossEntropyLoss(weight=class_weights)
@@ -146,7 +146,7 @@ logging.info(student_model)
 optimizer = optim.Adam(student_model.parameters(), lr=0.0001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
-distiller = Distiller(student=student_model, teacher=model)
+distiller = Distiller(student=student_model, teacher=teacher_model)
 distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
 
 num_epochs = 50
@@ -177,7 +177,7 @@ for epoch in range(num_epochs):
         inputs, labels = inputs.to(device), labels.to(device)
         results = distiller.test_step((inputs, labels))
         running_loss += results["student_loss"]
-        all_preds.extend(torch.argmax(distiller.student(inputs), dim=1).cpu().numpy())
+        all_preds.extend(torch.argmax(distiller.student(inputs).logits, dim=1).cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
     epoch_loss = running_loss / len(val_loader)
     val_losses.append(epoch_loss)
@@ -217,7 +217,7 @@ all_preds = []
 all_labels = []
 for inputs, labels in val_loader:
     inputs, labels = inputs.to(device), labels.to(device)
-    all_preds.extend(torch.argmax(distiller.student(inputs), dim=1).cpu().numpy())
+    all_preds.extend(torch.argmax(distiller.student(inputs).logits, dim=1).cpu().numpy())
     all_labels.extend(labels.cpu().numpy())
 
 # Log classification report and confusion matrix for the best model
