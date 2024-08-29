@@ -62,7 +62,7 @@ class Distiller(nn.Module):
         return {"student_loss": student_loss.item()}
 
 # Setup logging
-log_file = 'mobilevit_distill_1.log'
+log_file = 'mobilevit_distill_2.log'
 logging.basicConfig(filename=log_file, level=logging.INFO, format='%(asctime)s %(message)s')
 
 def log_system_usage():
@@ -147,7 +147,7 @@ optimizer = optim.Adam(student_model.parameters(), lr=0.0001)
 distillation_loss_fn = nn.KLDivLoss(reduction='batchmean')
 
 distiller = Distiller(student=student_model, teacher=teacher_model)
-distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.1, temperature=5)
+distiller.compile(optimizer, criterion, distillation_loss_fn, alpha=0.3, temperature=5)
 
 num_epochs = 50
 train_losses = []
@@ -186,8 +186,8 @@ for epoch in range(num_epochs):
     # Save the best model
     if epoch_loss < best_val_loss:
         best_val_loss = epoch_loss
-        student_model.save_pretrained('distilled_mobilevit_xxs_1')
-        feature_extractor.save_pretrained('distilled_mobilevit_xxs_1')
+        student_model.save_pretrained('distilled_mobilevit_xxs_2')
+        feature_extractor.save_pretrained('distilled_mobilevit_xxs_2')
         best_preds = all_preds
         best_labels = all_labels
     
@@ -205,11 +205,12 @@ plt.xlabel('Epoch')
 plt.ylabel('Loss')
 plt.legend()
 plt.title('Training and Validation Losses')
-plt.savefig('distilled_mobilevit_xxs_1_losses.png')
+plt.savefig('distilled_mobilevit_xxs_2_losses.png')
 plt.close()
 
 # Reload the best model weights
-student_model.load_state_dict(torch.load('distilled_mobilevit_xxs_1'))
+student_model = AutoModelForImageClassification.from_pretrained('distilled_mobilevit_xxs_2')
+student_model = student_model.to(device)
 
 # Generate confusion matrix for the best model
 distiller.eval()
@@ -232,8 +233,5 @@ sns.heatmap(conf_matrix, annot=True, fmt='d', cmap='Blues', xticklabels=class_na
 plt.xlabel('Predicted')
 plt.ylabel('True')
 plt.title('Best Model Confusion Matrix')
-plt.savefig('distilled_mobilevit_xxs_1_confusion.png')
+plt.savefig('distilled_mobilevit_xxs_2_confusion.png')
 plt.close()
-
-# Save the trained student model
-logging.info("Model saved successfully.")
