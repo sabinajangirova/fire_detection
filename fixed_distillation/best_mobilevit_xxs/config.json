@@ -1,0 +1,74 @@
+{
+  "_name_or_path": "apple/mobilevit-xx-small",
+  "architectures": [
+    "MobileViTForImageClassification"
+  ],
+  "aspp_dropout_prob": 0.1,
+  "aspp_out_channels": 256,
+  "atrous_rates": [
+    6,
+    12,
+    18
+  ],
+  "attention_probs_dropout_prob": 0.0,
+  "classifier_dropout_prob": 0.1,
+  "conv_kernel_size": 3,
+  "expand_ratio": 2.0,
+  "hidden_act": "silu",
+  "hidden_dropout_prob": 0.05,
+  "hidden_sizes": [
+    64,
+    80,
+    96
+  ],
+  "id2label": {
+    "0": "boat_fire",
+    "1": "building_fire",
+    "10": "train_fire",
+    "11": "van_fire",
+    "2": "bus_fire",
+    "3": "car_fire",
+    "4": "cargo_fire",
+    "5": "electric_fire",
+    "6": "forest_fire",
+    "7": "non_fire",
+    "8": "pickup_fire",
+    "9": "suv_fire"
+  },
+  "image_size": 256,
+  "initializer_range": 0.02,
+  "label2id": {
+    "boat_fire": "0",
+    "building_fire": "1",
+    "bus_fire": "2",
+    "car_fire": "3",
+    "cargo_fire": "4",
+    "electric_fire": "5",
+    "forest_fire": "6",
+    "non_fire": "7",
+    "pickup_fire": "8",
+    "suv_fire": "9",
+    "train_fire": "10",
+    "van_fire": "11"
+  },
+  "layer_norm_eps": 1e-05,
+  "mlp_ratio": 2.0,
+  "model_type": "mobilevit",
+  "neck_hidden_sizes": [
+    16,
+    16,
+    24,
+    48,
+    64,
+    80,
+    320
+  ],
+  "num_attention_heads": 4,
+  "num_channels": 3,
+  "output_stride": 32,
+  "patch_size": 2,
+  "qkv_bias": true,
+  "semantic_loss_ignore_index": 255,
+  "torch_dtype": "float32",
+  "transformers_version": "4.39.2"
+}
